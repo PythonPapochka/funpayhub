@@ -7,9 +7,8 @@ from contextlib import suppress
 from collections.abc import Callable, Awaitable
 
 from funpaybotengine import Bot
-from funpaybotengine.types import Category
+from funpaybotengine.types import Category, RaiseOffersResponse
 from funpaybotengine.exceptions import UnauthorizedError
-from funpaybotengine.exceptions.action_exceptions import RaiseOffersError
 from funpaybotengine.exceptions.session_exceptions import (
     FunPayServerError,
     RateLimitExceededError,
@@ -59,13 +58,12 @@ class OffersRaiser:
         self._modifying_lock = asyncio.Lock()
         self._requesting_lock = asyncio.Lock()
 
-    async def _raise_category_until_complete(self, category: Category) -> None:
+    async def _raise_category_until_complete(self, category: Category) -> RaiseOffersResponse:
         while True:
             try:
                 # Искусственное замедление запроса, чтобы не превысить rate-лимиты FunPay.
                 await asyncio.sleep(2)
-                await self._bot.raise_offers(category.id)
-                return
+                return await self._bot.raise_offers(category.id)
             except RateLimitExceededError:
                 logger.warning(
                     _en(
@@ -86,31 +84,29 @@ class OffersRaiser:
         while True:
             try:
                 async with self._requesting_lock:
-                    await self._raise_category_until_complete(category)
-                    logger.info(
-                        _en('Offers of category %s has been raised. Next try in %d.'),
-                        category.name,
-                        3600,
-                    )
-                    if on_raise is not None:
-                        with suppress(Exception):
-                            await on_raise(category)
-                await asyncio.sleep(3600)
+                    result = await self._raise_category_until_complete(category)
+                    if not result.error:
+                        logger.info(
+                            _en('Offers of category %s has been raised. Next try in %d.'),
+                            category.name,
+                            3600,
+                        )
+                        if on_raise is not None:
+                            with suppress(Exception):
+                                await on_raise(category)
+                    else:
+                        logger.info(
+                            _en('Unable to raise offers of category %s: need to wait for %d.'),
+                            category.name,
+                            result.wait,
+                        )
+                await asyncio.sleep(result.wait + 1)
             except UnauthorizedError:
                 logger.error(
                     _en('Unable to raise offers of category %s: not authorized.'),
                     category.name,
                 )
                 return
-            except RaiseOffersError as e:
-                wait_time = e.wait_time or 1800
-                logger.info(
-                    _en('Unable to raise offers of category %s: need to wait for %d.'),
-                    category.name,
-                    wait_time,
-                )
-                await asyncio.sleep(wait_time)
-                continue
             except FunPayServerError:
                 logger.warning(
                     _en('A Server error occurred while raising offers of category %s.'),
